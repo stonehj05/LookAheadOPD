@@ -1,0 +1,126 @@
+# LookAheadOPD on ALFWorld: Qwen3-1.7B student, Qwen3-8B teacher.
+# Method: trinity/common/workflows/envs/lookahead_opd/gate.py. The explorer only plays the game; the trainer
+# asks the teacher (A) whether it agrees with each sampled turn's action and, where it does not, (B) whether
+# the student's next 5 steps make progress and (C) whether its own 5 steps from there do, then weights the
+# turn's OPD signal: 1.0 (B no, C yes) / 0.7 (both progress) / 0.3 (neither) / 0.0 (B yes, C no); agreed
+# turns get 0. The student's final window uses the outcome (a won game).
+#
+# TPU layout: v4-16 or two VMs of a v4-32 (2 VMs x 4 chips): worker 0 = trainer (4 chips), worker 1 = 2 students and
+#   2 Qwen3-8B teachers (one chip each).
+# Launch (see README.md):
+#   bash scripts/tpu/start_cluster.sh
+#   trinity run --config configs/alfworld/lookahead_opd_qwen3_8b_to_1.7b.yaml
+project: "ALFWORLD_LOOKAHEAD_OPD"
+name: "alfworld_lookahead_opd_qwen3_8b_to_1.7b"
+checkpoint_root_dir: ./checkpoints
+continue_from_checkpoint: true  # resume from the run's latest full checkpoint if there is one
+
+algorithm:
+  sample_strategy: staleness_control
+  sample_strategy_args:
+    max_staleness: 2
+  algorithm_type: on_policy_distill
+  advantage_fn: multi_turn_opd
+  repeat_times: 1
+  advantage_fn_args:
+    kl_coef: 1.0
+  optimizer:
+    lr: 1e-6
+
+model:
+  model_path: Qwen/Qwen3-1.7B
+  max_prompt_tokens: 10240
+  max_response_tokens: 512
+
+cluster:
+  node_num: 2  # TPU VMs x 4 chips; trainer = 8 - (2 students + 2 x 1 teacher chips) = 4
+  gpu_per_node: 4
+
+buffer:
+  total_steps: 3000  # explorer steps: upper bound only; the run ends at trainer.total_steps
+  batch_size: 16  # games per explore step
+  train_batch_size: 64  # turns per training step
+  explorer_input:
+    taskset:
+      name: alfworld
+      storage_type: file
+      path: ${oc.env:HOME}/alf-data/lookahead_opd_tasks/train.jsonl  # data/alfworld/train.jsonl with absolute game paths (scripts/tpu/setup_node.sh)
+      split: train
+      format:
+        prompt_key: 'game_file'
+      rollout_args:
+        temperature: 1.0
+        logprobs: 0  # the student's log-probs, needed for the OPD advantage
+      workflow_args:
+        max_env_steps: 30
+        # look-ahead window: the student's next steps (B), the steps the teacher plays (C)
+        progress_window_size: 5
+        # decoding of (A) the agreement question, (B)/(C) the progress question, (C) the teacher's own steps
+        consistency_temperature: 0.0
+        consistency_max_tokens: 512
+        progress_temperature: 0.0
+        progress_max_tokens: 512
+        teacher_rollout_temperature: 0.0
+        teacher_rollout_max_tokens: 512
+        # weight of a disagreed turn; S = the student does not progress (B), T = the teacher does (C)
+        both_weight: 1.0          # S and T
+        teacher_only_weight: 0.7  # T only
+        student_only_weight: 0.3  # S only
+        neither_weight: 0.0       # neither
+        # trainer side (trinity/trainer/tunix/teacher_gate.py)
+        teacher_parallel_prompts: 32  # requests in flight per teacher engine
+        skip_zero_weight_scoring: false  # true: do not score weight-0 turns (same training, less raw-KL logging)
+    default_workflow_type: 'LookAheadOPD_alfworld_workflow'
+  trainer_input:
+    experience_buffer:
+      name: alfworld_lookahead_opd_qwen3_8b_to_1.7b_buffer
+      storage_type: queue
+      path: 'sqlite:////dev/shm/lookahead_opd_buffers/alfworld_lookahead_opd_qwen3_8b_to_1.7b_buffer.db'  # node-local tmpfs
+
+explorer:
+  eval_interval: 5
+  runner_per_model: 8
+  max_timeout: 3600
+  rollout_model:
+    engine_type: vllm_tpu
+    engine_num: 2  # one chip each
+    tensor_parallel_size: 1
+    enable_prefix_caching: false
+    enforce_eager: true
+    dtype: bfloat16
+    seed: 42
+    gpu_memory_utilization: 0.7
+    enable_chunked_prefill: true
+  auxiliary_models:
+    # the teacher: asked and scored by the trainer, reached by its Ray actor name
+    - model_path: Qwen/Qwen3-8B  # Hugging Face cache on every worker (scripts/tpu/setup_node.sh)
+      engine_type: vllm_tpu
+      engine_num: 2
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.75
+      enable_prefix_caching: false
+      enforce_eager: true
+      dtype: bfloat16
+      seed: 42
+      max_model_len: 20480
+      max_prompt_tokens: 16384
+      max_response_tokens: 512
+  env_vars:
+    TMPDIR: /dev/shm/tmp
+    RAY_TMPDIR: /dev/shm/ray_tmp
+
+synchronizer:
+  sync_method: 'checkpoint'  # TPU: weights reach the explorer through a per-step checkpoint
+  sync_style: 'dynamic_by_explorer'
+  sync_interval: 1
+  sync_timeout: 3600
+
+trainer:
+  trainer_type: tunix  # TPU: JAX trainer
+  total_steps: 200
+  save_interval: 50
+  grad_clip: 1.0
+  sync_checkpoint_dir: /dev/shm/lookahead_opd_sync  # per-step weight-sync checkpoints on tmpfs
+
+monitor:
+  monitor_type: tensorboard

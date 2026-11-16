@@ -1,0 +1,34 @@
+# ScienceWorld and WebShop packages of the tested env, on top of requirements-tpu.txt (install with --no-deps).
+# WebShop's spaCy model: python -m spacy download en_core_web_sm (en-core-web-sm==3.8.0 was tested).
+beautifulsoup4==4.15.0
+cleantext==1.1.4
+cython==3.3.0
+defusedxml==0.7.1
+faiss-cpu==1.15.1
+flatbuffers==25.12.19
+gym==0.24.0
+gym-notices==0.1.0
+joblib==1.6.0
+lightgbm==4.7.0
+narwhals==2.27.1
+nltk==3.10.3
+nmslib==2.1.2
+onnxruntime==1.31.0
+outcome==1.3.0.post0
+py4j==0.10.9.9
+pybind11==3.1.0
+pyjnius==1.9.0
+pyserini==0.17.0
+pysocks==1.7.1
+rank-bm25==0.2.2
+rapidfuzz==3.14.6
+scienceworld==1.2.3
+scikit-learn==1.9.1
+selenium==4.51.0
+soupsieve==3.0.3
+thefuzz==0.22.1
+threadpoolctl==3.7.0
+trio==0.34.0
+trio-websocket==0.12.2
+websocket-client==1.9.2
+wsproto==1.3.2
